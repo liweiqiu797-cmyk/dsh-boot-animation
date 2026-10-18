@@ -234,6 +234,16 @@ if ($rows -gt 0) {
   # uses the terminator the file already uses, so the style stays uniform, and it
   # ends on its own newline instead of leaving a blank line behind.
   $raw = [System.IO.File]::ReadAllText($PatchFile, $Utf8NoBom)
+  # Ask about the pre-append text, and ask about the ENTRY ID rather than the
+  # package name: the config override the settings card writes is keyed by
+  # `- id: boot-animation`, which need not mention the package name at all, so
+  # matching the name reported neither that row nor anything else.
+  # (tools/install.sh asked the same question against the file it had already
+  # written, so its note could never be anything but true.)
+  if ($raw -match 'boot-animation') {
+    Say '  note: the layer already carried this plugin id without an insert row'
+    Say '        (a config override, e.g. settings the card saved); it is left as it is.'
+  }
   $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
   $block = '- insert:' + $newline + '    - id: boot-animation' + $newline + '      name: ' + $PluginName + $newline
   if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n") -and -not $raw.EndsWith("`r")) {
@@ -241,10 +251,6 @@ if ($rows -gt 0) {
   }
   [System.IO.File]::WriteAllText($PatchFile, $raw + $block, $Utf8NoBom)
   Say '  appended 3 lines'
-  if ($raw -match [regex]::Escape($PluginName)) {
-    Say '  note: the layer already carried this plugin name without an insert row'
-    Say '        (a config override, e.g. settings the card saved); it is left as it is.'
-  }
 }
 
 Say '=== 4/5 tell dsh to pick it up ==='

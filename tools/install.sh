@@ -251,13 +251,23 @@ say "  package : $PACKAGE_DIR"
 say "  dsh home: $DSH_HOME_DIR"
 say "  profile : $PROFILE_DIR"
 if [ ! -f "$PROFILE_MANIFEST" ]; then
+  # The directory can be there and still not be a profile: what makes one is the
+  # manifest, so saying "no profile at <path>" while listing that same name a line
+  # later is both true and useless. Say which of the two it is.
   found=''
   if [ -d "$DSH_HOME_DIR/profiles" ]; then
     for entry in "$DSH_HOME_DIR"/profiles/*; do
       [ -d "$entry" ] || continue
       name=${entry##*/}
-      found="$found${found:+, }$name"
+      if [ -f "$entry/package.json" ]; then
+        found="$found${found:+, }$name"
+      elif [ -z "$found" ] && [ "$name" = "$PROFILE" ]; then
+        found="(only '$name', and it has no package.json)"
+      fi
     done
+  fi
+  if [ -d "$PROFILE_DIR" ] && [ -f "$PROFILE_DIR/cordis.patch.yml" ]; then
+    fail "'$PROFILE_DIR' has a cordis.patch.yml but no package.json, so it is not a profile directory. Pass a profile that has one."
   fi
   fail "no profile at '$PROFILE_DIR'. Profiles present: ${found:-none}. Pass --profile <name>."
 fi
@@ -407,6 +417,19 @@ esac
 if [ "$rows" -gt 0 ]; then
   say "  an insert row for this plugin is already there ($rows of them); leaving it alone"
 else
+  # Whether the layer carried this plugin's id somewhere OTHER than an insert row
+  # — a config override the settings card wrote — has to be read BEFORE the row is
+  # appended, and it has to match the id rather than the package name: the override
+  # the settings service writes is keyed by `- id: boot-animation`, which need not
+  # mention the package name at all, so matching the name reported neither that row
+  # nor anything else. The block appended below carries both strings, so asking
+  # afterwards answers yes every single time and the note becomes pure noise.
+  # `install.ps1` gets the timing right for free — it matches the text it read
+  # before it wrote — but it still matches on the name.
+  if grep -q -- "$PATCH_ID" "$PATCH_FILE" 2>/dev/null; then
+    say '  note: the layer already carried this plugin id without an insert row'
+    say '        (a config override, e.g. settings the card saved); it is left as it is.'
+  fi
   # A file whose last line has no newline would glue the new row onto it, so make
   # sure the row starts on a line of its own. Only a byte is added, and only when
   # the file was already missing that newline.
@@ -416,10 +439,6 @@ else
   printf -- '- insert:\n    - id: %s\n      name: %s\n' "$PATCH_ID" "$PLUGIN_NAME" >> "$PATCH_FILE" ||
     fail "cannot append to '$PATCH_FILE'."
   say '  appended 3 lines'
-  if grep -q -- "$PLUGIN_NAME" "$PATCH_FILE" 2>/dev/null; then
-    say '  note: the layer already carried this plugin name without an insert row'
-    say '        (a config override, e.g. settings the card saved); it is left as it is.'
-  fi
 fi
 
 say '=== 4/5 tell dsh to pick it up ==='
