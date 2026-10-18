@@ -78,6 +78,20 @@
   // outlives the exit (see enter), and only `span` when the clip's own end is what
   // ends the exit — there the track stops with the picture by itself.
   var AUDIO_GRACE_MS = 1300
+
+  // How long a clip may stop advancing before the screen is released anyway.
+  //
+  // Every other bound in this file sits BEFORE the first frame: the manifest
+  // window, the six-second no-frame watchdog, the audio window, the unknown-length
+  // fallback. Once `reveal()` has run, none of them is armed any more, and the
+  // only things left that can release the screen are the clip's own `ended`, a
+  // decode error, and the tail dissolve. A clip that paints a frame and then
+  // wedges on the network therefore had no bound at all. `timeupdate` is the
+  // heartbeat: media time keeps moving while a background tab has its frames
+  // throttled, so silence there means bytes stopped arriving rather than that the
+  // page is idle.
+  var STALL_LIMIT_MS = 6000
+
   var ARC_MIN = 72
   var ARC_SPAN = 216
   var cache = { startedAt: Date.now(), current: null, loaded: false }
@@ -532,6 +546,17 @@
   // when both the clip is over and the kernel is actually ready.
   var clipDone = false
 
+  // The stall watchdog's handle, kept out here so `enter()` can stop it on every
+  // exit path rather than only the ones that happen to remember.
+  var stallWatch = null
+  var lastProgress = 0
+
+  function stopStallWatch() {
+    if (stallWatch === null) return
+    globalThis.clearInterval(stallWatch)
+    stallWatch = null
+  }
+
   // Set by the loader to the current clip's tail check.
   //
   // There is a genuine gap without it: if the kernel becomes ready while the clip
@@ -712,6 +737,7 @@
   function enter(fadeMs, tail) {
     if (parts.root.getAttribute('data-state') === 'leaving') return
     entered = true
+    stopStallWatch()
 
     var span = typeof fadeMs === 'number' && fadeMs > 0
       ? Math.max(Math.min(fadeMs, FADE_MS), 120)
@@ -1164,6 +1190,32 @@
           namespace.failures = failures.join(' ')
         }
 
+        // The bound the first-frame watchdogs could not be: once the picture is up,
+        // `advance` is disarmed and nothing else in this closure can release the
+        // screen except the clip's own `ended`. Armed at reveal, stopped by
+        // `enter()`, by `ended`, by `error`, and by the pool running dry.
+        //
+        // It hands the screen over rather than calling tryNext(). tryNext() returns
+        // early once `settled` is set — and reveal() does too — so a replacement
+        // clip would play behind an opacity of 0, which is the freeze we are here to
+        // avoid rather than the cure. For a screen that is only decoration the
+        // choice is between showing the app and showing a stopped frame.
+        //
+        // Not armed in click mode: there the press is the release, by design, and a
+        // clip that is merely buffering must not take that decision away.
+        var armStallWatch = function (video, clip) {
+          stopStallWatch()
+          if (ENTER_MODE === 'click') return
+          lastProgress = Date.now()
+          stallWatch = globalThis.setInterval(function () {
+            if (clipDone || video.ended) { stopStallWatch(); return }
+            if (Date.now() - lastProgress < STALL_LIMIT_MS) return
+            stopStallWatch()
+            noteFailure(clip, 'stalled')
+            enter()
+          }, 1000)
+        }
+
         var tryNext = function () {
           if (settled || attempt >= order.length) {
             // Every candidate failed. The gradient and the hint remain, so the
@@ -1211,6 +1263,7 @@
             if (settled) return
             settled = true
             globalThis.clearTimeout(advance)
+            armStallWatch(video, clip)
             // The fade is driven by an inline style rather than a CSS rule: an
             // inline value cannot lose a specificity contest with anything else on
             // the page. Written only once a frame has actually been presented —
@@ -1233,6 +1286,7 @@
           video.addEventListener('error', function () {
             globalThis.clearTimeout(advance)
             globalThis.clearTimeout(endless)
+            stopStallWatch()
             var code = video.error ? video.error.code : 0
             noteFailure(clip, 'err' + String(code))
             tryNext()
@@ -1243,6 +1297,7 @@
           // are done, so nothing here has to know or care how long the clip is.
           video.addEventListener('ended', function () {
             globalThis.clearTimeout(endless)
+            stopStallWatch()
             namespace.clipEndedAt = Date.now()
             clipDone = true
             maybeEnter()
@@ -1261,6 +1316,16 @@
               maybeEnter()
             }, ENDLESS_MS)
           }, { once: true })
+          // The heartbeat the stall watchdog reads. Deliberately NOT bumped by
+          // `stalled` / `waiting` below: those events are the clock stopping, and
+          // treating them as progress would disarm the very thing watching for it.
+          video.addEventListener('timeupdate', function () {
+            lastProgress = Date.now()
+          })
+          video.addEventListener('playing', function () {
+            lastProgress = Date.now()
+          })
+
           // A stall is the difference between "the clip ended" and "the clip is
           // waiting for bytes". Recording it is what makes a freeze reportable
           // instead of guessed at, and the diagnostic line prints it.
